@@ -185,11 +185,6 @@ lego_constructor/
 │   ├── test_brick_detector.py
 │   ├── test_reconstructor.py
 │   └── test_sequencer.py
-├── example/                         # Example project output
-│   ├── 1000x800.jpg                 # Input image
-│   └── output/                      # Generated instructions
-│       ├── instructions.html        # Full instruction set
-│       └── step_01.png - step_08.png
 ├── mini_castle/                     # Example: multi-image model
 │   ├── *.png                        # Multiple reference images
 │   └── output/                      # Generated instructions
@@ -262,7 +257,6 @@ The project includes several example models that demonstrate the current capabil
 
 | Model | Status | Details |
 |-------|--------|---------|
-| **example/** | ✅ Complete | Single image → 8 step instructions. Basic model showcasing full pipeline. |
 | **nano_castle/** | ✅ Complete | Single 1000x800px image → 8 step instructions with parts list. |
 | **mini_castle/** | ✅ Complete | Multi-image input (3 PNG reference photos) → 10 step instructions. |
 | **alamo/** | 🔄 In Progress | Building reference images for complex model testing. |
@@ -273,13 +267,12 @@ Generate instructions for any example:
 
 ```bash
 # Single image example
-./generate_lego_instructions example
+./generate_lego_instructions nano_castle
 
 # Multi-image example
 ./generate_lego_instructions mini_castle
 
 # View results
-open example/output/instructions.html
 open nano_castle/output/instructions.html
 open mini_castle/output/instructions.html
 ```
