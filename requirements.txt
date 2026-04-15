@@ -1,0 +1,18 @@
+# Core dependencies
+boto3>=1.26.0
+click>=8.1.0
+
+# Image processing
+opencv-python>=4.8.0
+pillow>=10.0.0
+
+# Numerical and spatial computing
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Templating
+jinja2>=3.1.0
+
+# Development & testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
