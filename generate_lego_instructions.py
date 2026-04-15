@@ -4,6 +4,7 @@
 import sys
 import os
 import logging
+import shutil
 from pathlib import Path
 
 import click
@@ -24,7 +25,6 @@ if env_file.exists():
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lego_creator.image_processor import load_images
-from lego_creator.brick_detector import detect_bricks
 from lego_creator.reconstructor_3d import reconstruct
 from lego_creator.sequencer import sequence
 from lego_creator.instruction_generator import render_step_image, generate_html
@@ -84,15 +84,9 @@ def main(folder: str, verbose: bool):
         images = load_images(folder_path)
         click.echo(f"   ✓ Loaded {len(images)} images")
 
-        # Phase 2: Detect bricks
-        click.echo("🔍 Phase 2: Detecting bricks with Claude Vision...")
-        detections = detect_bricks(images, client)
-        total_detected = sum(len(v) for v in detections.values())
-        click.echo(f"   ✓ Detected {total_detected} brick(s)")
-
-        # Phase 3: 3D reconstruction
-        click.echo("🏗️  Phase 3: Reconstructing 3D model...")
-        bricks, width, depth, height = reconstruct(images, detections, client)
+        # Phase 2: Analyse images and reconstruct 3D model in one pass
+        click.echo("🔍 Phase 2: Analysing model and reconstructing 3D layout...")
+        bricks, width, depth, height = reconstruct(images, client)
         click.echo(f"   ✓ Placed {len(bricks)} brick(s) in 3D space ({width}×{depth}×{height} studs)")
 
         # Phase 4: Sequencing
@@ -103,6 +97,8 @@ def main(folder: str, verbose: bool):
         # Phase 5: Generate output
         click.echo("📄 Phase 5: Generating instructions...")
         output_dir = folder_path / "output"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
         output_dir.mkdir(exist_ok=True)
 
         # Render step images

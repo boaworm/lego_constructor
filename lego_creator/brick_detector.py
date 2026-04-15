@@ -51,20 +51,30 @@ def detect_bricks(images: list[ProcessedImage], client) -> dict:
                 },
             })
 
-        # Add text prompt
-        prompt = """Analyze these LEGO model images. For each distinct brick you can see, provide:
-1. Type: dimensions in studs (e.g., "2x4", "1x2", "1x1")
-2. Color: a standard LEGO color name (red, blue, yellow, white, black, green, orange, purple, pink, brown, grey, dark_grey, light_grey, cyan, tan)
-3. Position description: which part of the model (e.g., "front-left corner", "center layer 2")
-4. Confidence: 0.0-1.0 estimate of how certain you are
+        # Build filename list for prompt
+        filenames = [img.path.name for img in batch]
+        filenames_str = ", ".join(f'"{f}"' for f in filenames)
 
-Return a JSON object with this structure:
-{
-  "image_filename": [
-    {"type": "2x4", "color": "red", "position_desc": "...", "confidence": 0.95},
+        # Add text prompt
+        prompt = f"""Analyze these LEGO model images. The images are named (in order): {filenames_str}.
+
+Standard LEGO brick types (use only these): 1x1, 1x2, 1x3, 1x4, 1x6, 1x8, 2x2, 2x3, 2x4, 2x6, 2x8.
+
+IMPORTANT: Identify each individual brick separately. Do NOT merge adjacent same-color bricks into a larger piece. For example, four 2x2 bricks arranged in a square are FOUR separate 2x2 bricks, not one 4x4. Look carefully at the seams and stud pattern to count individual bricks.
+
+For each distinct brick, provide:
+1. Type: use only the standard sizes listed above
+2. Color: one of (red, blue, yellow, white, black, green, orange, purple, pink, brown, grey, dark_grey, light_grey, cyan, tan)
+3. Position description: where in the model (e.g., "base layer front-left", "second floor rear-right")
+4. Confidence: 0.0-1.0
+
+Return a JSON object using the exact filenames as keys:
+{{
+  {filenames[0]!r}: [
+    {{"type": "2x2", "color": "green", "position_desc": "base layer front-left", "confidence": 0.9}},
     ...
   ]
-}
+}}
 
 Be thorough and list every visible brick, even if partially obscured."""
 
@@ -90,6 +100,7 @@ Be thorough and list every visible brick, even if partially obscured."""
         response_data = response['body'].read()
         response_body = json.loads(response_data)
         response_text = response_body['content'][0]['text']
+        logger.debug(f"Raw response from Claude: {response_text[:500]}")
         try:
             response_json = json.loads(response_text)
         except json.JSONDecodeError as e:
@@ -110,8 +121,10 @@ Be thorough and list every visible brick, even if partially obscured."""
                     logger.error(f"Failed to parse extracted JSON: {e2}")
                     response_json = {}
             else:
-                logger.error(f"Failed to parse JSON response: {response_text[:200]}")
+                logger.error(f"Failed to parse JSON response (first 500 chars): {response_text[:500]}")
                 response_json = {}
+
+        logger.debug(f"Parsed JSON result: {response_json}")
 
         # Map detections to image names
         for img in batch:

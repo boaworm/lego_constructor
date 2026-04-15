@@ -4,7 +4,7 @@ import os
 
 # Claude API
 CLAUDE_MODEL = os.getenv("ANTHROPIC_MODEL", "anthropic.claude-opus-4-6-v1")
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 # Image processing
 SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp"}

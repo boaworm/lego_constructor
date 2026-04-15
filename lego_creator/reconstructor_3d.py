@@ -1,28 +1,49 @@
-"""3D reconstruction of brick positions from detections."""
+"""3D reconstruction of brick positions from images using layer ASCII maps."""
 
 import json
 import logging
+import re
 
 from .models import ProcessedImage, Brick
 from .config import CLAUDE_MODEL, MAX_TOKENS, MAX_STUDS_DEFAULT, MAX_LAYERS_DEFAULT
 
 logger = logging.getLogger(__name__)
 
+# Color letter → color name mapping used in ASCII maps
+_LETTER_TO_COLOR = {
+    "K": "black",
+    "G": "green",
+    "Y": "yellow",
+    "R": "red",
+    "B": "blue",
+    "W": "white",
+    "O": "orange",
+    "P": "purple",
+    "N": "brown",
+    "S": "grey",
+    "C": "cyan",
+    "T": "tan",
+}
+_COLOR_TO_LETTER = {v: k for k, v in _LETTER_TO_COLOR.items()}
+
+# Allowed brick sizes (width × depth) in EW orientation
+_ALLOWED_SIZES = [
+    (2, 8), (2, 6), (2, 4), (2, 3), (2, 2),
+    (1, 8), (1, 6), (1, 4), (1, 3), (1, 2), (1, 1),
+]
+
 
 def reconstruct(
     images: list[ProcessedImage],
-    detections: dict,
     client,
 ) -> tuple[list[Brick], int, int, int]:
     """
-    Reconstruct 3D brick positions from multiple images and detections.
+    Analyse images and produce a complete 3D brick layout.
 
-    Sends all images + detection summary to Claude and asks it to place
-    each unique brick at (x, y, z, orientation) on a stud grid.
+    Asks Claude for a per-layer ASCII stud map, then converts it to Brick objects.
 
     Args:
         images: List of ProcessedImage objects
-        detections: Dict from brick_detector output
         client: Anthropic API client
 
     Returns:
@@ -30,7 +51,6 @@ def reconstruct(
     """
     logger.info("Starting 3D reconstruction...")
 
-    # Build content with all images
     content = []
     for img in images:
         content.append({
@@ -42,125 +62,218 @@ def reconstruct(
             },
         })
 
-    # Prepare detection summary for context
-    detection_summary = json.dumps(detections, indent=2)
+    prompt = """You are a LEGO expert. Produce a complete stud-by-stud map of this LEGO model.
 
-    # Prompt for 3D reconstruction
-    prompt = f"""You have already analyzed these LEGO model images and detected the following bricks per image:
+COLOR CODES (one letter per stud):
+  K=black  G=green  Y=yellow  R=red  B=blue  W=white
+  O=orange P=purple N=brown   S=grey C=cyan  T=tan
+  .=empty (air / no brick)
 
-{detection_summary}
+OUTPUT FORMAT — one grid per layer, bottom (z=0) first:
+  Each row of the grid = one row of studs front-to-back (y direction).
+  Each column of the grid = one column of studs left-to-right (x direction).
+  All rows must be the same width. All layers must be the same size.
 
-Now, synthesize all of this information into a unified 3D model. Place each unique brick at specific (x, y, z, orientation) coordinates on a stud grid.
+Example for a 4-wide × 3-deep model with 2 layers:
+z=0
+KKKK
+KKKK
+KKKK
 
-Requirements:
-1. Use a 3D coordinate system where:
-   - x = column (0 = left, increasing to the right)
-   - y = row (0 = front, increasing backward)
-   - z = layer (0 = ground, increasing upward)
-   - All values are in studs (1 stud = unit grid)
+z=1
+YYYY
+Y..Y
+YYYY
 
-2. For each brick, determine:
-   - Its grid position (x, y, z)
-   - Its orientation: "EW" if the long axis runs left-right, "NS" if it runs front-back
-   - (For a 2x4 brick in EW orientation at x=1, y=2, z=0, it occupies studs x=1-2, y=2, z=0)
+RULES:
+1. Every stud that has a brick must have the correct color letter.
+2. Use . only where there is genuinely no brick (air gaps, arch openings, etc.).
+3. The base layers should be solid — only add . for visible holes or openings.
+4. Be precise: count the studs carefully from the image.
 
-3. Bricks must not overlap on the same layer.
+After the grids, add one line: DIMS: WxDxH  (width, depth, height in studs)
 
-4. Use the multiple images to triangulate positions. Bricks visible in multiple views should have consistent positions.
+Output the grids and DIMS line only — no other text."""
 
-5. Return the maximum dimensions needed: width (max x+1), depth (max y+1), height (max z+1).
+    content.append({"type": "text", "text": prompt})
 
-Return ONLY a valid JSON object (no markdown, no comments):
-{{
-  "bricks": [
-    {{"type": "2x4", "color": "red", "x": 0, "y": 0, "z": 0, "orientation": "EW"}},
-    {{"type": "1x1", "color": "blue", "x": 2, "y": 0, "z": 0, "orientation": "EW"}},
-    ...
-  ],
-  "width": 10,
-  "depth": 8,
-  "height": 3
-}}
-
-Be precise with positions. Use all available visual information from the images."""
-
-    content.append({
-        "type": "text",
-        "text": prompt,
-    })
-
-    # Call Claude via Bedrock with all images
     response = client.invoke_model(
         modelId=CLAUDE_MODEL,
         body=json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": MAX_TOKENS,
-            "messages": [{
-                "role": "user",
-                "content": content,
-            }],
+            "messages": [{"role": "user", "content": content}],
         }),
     )
 
-    # Parse response
-    response_body = json.loads(response['body'].read())
-    response_text = response_body['content'][0]['text']
-    try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
-        # Try to extract JSON from markdown code blocks
-        if "```json" in response_text:
-            json_str = response_text.split("```json")[1].split("```")[0].strip()
-            result = json.loads(json_str)
-        elif "```" in response_text:
-            json_str = response_text.split("```")[1].split("```")[0].strip()
-            result = json.loads(json_str)
-        else:
-            logger.error(f"Failed to parse JSON response: {response_text[:500]}")
-            raise ValueError("Could not parse 3D reconstruction from Claude")
+    response_body = json.loads(response["body"].read())
+    response_text = response_body["content"][0]["text"]
+    logger.debug(f"Raw ASCII map response:\n{response_text[:1000]}")
 
-    # Convert to Brick objects and validate
-    bricks = []
-    for brick_data in result.get("bricks", []):
-        brick = Brick(
-            type=brick_data["type"],
-            color=brick_data["color"],
-            x=brick_data["x"],
-            y=brick_data["y"],
-            z=brick_data["z"],
-            orientation=brick_data["orientation"],
-            confidence=0.9,  # Set by Claude, we trust the reconstruction
-            source_images=[img.path.name for img in images],
-        )
-        bricks.append(brick)
-
-    # Extract model dimensions
-    width = result.get("width", MAX_STUDS_DEFAULT)
-    depth = result.get("depth", MAX_STUDS_DEFAULT)
-    height = result.get("height", MAX_LAYERS_DEFAULT)
-
-    # Validate no overlaps
-    _validate_no_overlaps(bricks)
+    bricks, width, depth, height = _parse_ascii_maps(response_text)
 
     logger.info(f"3D reconstruction complete: {len(bricks)} bricks, "
                 f"{width}x{depth}x{height} grid")
+    return bricks, width, depth, height
+
+
+def _parse_ascii_maps(text: str) -> tuple[list[Brick], int, int, int]:
+    """Parse the ASCII layer maps into Brick objects."""
+    layers = {}  # z → list[str] (rows)
+    current_z = None
+    current_rows = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        # Layer header: "z=0", "z=1", etc.
+        m = re.match(r"z\s*=\s*(\d+)", line, re.IGNORECASE)
+        if m:
+            if current_z is not None and current_rows:
+                layers[current_z] = current_rows
+            current_z = int(m.group(1))
+            current_rows = []
+            continue
+
+        # DIMS line
+        if line.upper().startswith("DIMS"):
+            if current_z is not None and current_rows:
+                layers[current_z] = current_rows
+            break
+
+        # Grid row: non-empty line that only contains valid characters
+        if current_z is not None and line and re.match(r"^[A-Za-z\.]+$", line):
+            current_rows.append(line.upper())
+
+    # Flush last layer
+    if current_z is not None and current_rows:
+        layers[current_z] = current_rows
+
+    if not layers:
+        logger.error("No layer grids found in response")
+        raise ValueError("Could not parse layer maps from Claude response")
+
+    # Normalise: ensure all layers have the same width and depth
+    width = max(len(row) for rows in layers.values() for row in rows)
+    depth = max(len(rows) for rows in layers.values())
+    height = max(layers.keys()) + 1
+
+    for z, rows in layers.items():
+        # Pad rows to uniform width
+        layers[z] = [row.ljust(width, ".") for row in rows]
+        # Pad depth
+        while len(layers[z]) < depth:
+            layers[z].append("." * width)
+
+    # Convert each layer grid to bricks
+    bricks = []
+    for z in sorted(layers.keys()):
+        grid = layers[z]
+        layer_bricks = _grid_to_bricks(grid, z)
+        bricks.extend(layer_bricks)
 
     return bricks, width, depth, height
 
 
-def _validate_no_overlaps(bricks: list[Brick]) -> None:
-    """Check that no two bricks occupy the same cell on the same layer."""
-    occupied = {}  # (x, y, z) -> brick
-    for brick in bricks:
-        w, d = brick.dimensions()
-        for dx in range(w):
-            for dy in range(d):
-                key = (brick.x + dx, brick.y + dy, brick.z)
-                if key in occupied:
-                    other = occupied[key]
-                    logger.warning(
-                        f"Overlap detected: {brick.color} {brick.type} at {key} "
-                        f"overlaps {other.color} {other.type}"
-                    )
-                    # For now, keep going; could raise an error if strict
-                occupied[key] = brick
+def _grid_to_bricks(grid: list[str], z: int) -> list[Brick]:
+    """
+    Convert a 2D stud grid at layer z into Brick objects.
+
+    Uses a greedy largest-first tiling: scans left-to-right, top-to-bottom,
+    and at each unclaimed stud tries to place the largest allowed brick that fits.
+    """
+    depth = len(grid)
+    width = len(grid[0]) if grid else 0
+    claimed = [[False] * width for _ in range(depth)]
+    bricks = []
+
+    for y in range(depth):
+        for x in range(width):
+            if claimed[y][x]:
+                continue
+            color_letter = grid[y][x]
+            if color_letter == ".":
+                continue
+            color = _LETTER_TO_COLOR.get(color_letter, "grey")
+
+            # Try largest brick first
+            placed = False
+            for (bw, bd) in _ALLOWED_SIZES:
+                # Also try NS orientation (swap w and d)
+                for (fw, fd, orientation) in [(bw, bd, "EW"), (bd, bw, "NS")]:
+                    if fw == fd and orientation == "NS":
+                        continue  # skip duplicate for squares
+                    if x + fw > width or y + fd > depth:
+                        continue
+                    # Check all cells are the same color and unclaimed
+                    ok = True
+                    for dy in range(fd):
+                        for dx in range(fw):
+                            if claimed[y + dy][x + dx]:
+                                ok = False
+                                break
+                            if grid[y + dy][x + dx] != color_letter:
+                                ok = False
+                                break
+                        if not ok:
+                            break
+                    if ok:
+                        # Claim cells
+                        for dy in range(fd):
+                            for dx in range(fw):
+                                claimed[y + dy][x + dx] = True
+                        # Canonical type: always "AxB" where A≤B
+                        brick_type = f"{min(bw,bd)}x{max(bw,bd)}"
+                        bricks.append(Brick(
+                            type=brick_type,
+                            color=color,
+                            x=x,
+                            y=y,
+                            z=z,
+                            orientation=orientation,
+                            confidence=1.0,
+                            source_images=[],
+                        ))
+                        placed = True
+                        break
+                if placed:
+                    break
+
+            if not placed:
+                # Fallback: 1x1
+                claimed[y][x] = True
+                bricks.append(Brick(
+                    type="1x1",
+                    color=color,
+                    x=x,
+                    y=y,
+                    z=z,
+                    orientation="EW",
+                    confidence=1.0,
+                    source_images=[],
+                ))
+
+    return bricks
+
+
+def _extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract a JSON object from a response string."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for marker in ("```json", "```"):
+        if marker in text:
+            inner = text.split(marker)[1].split("```")[0].strip()
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    return None
