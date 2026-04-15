@@ -36,7 +36,10 @@ logger = logging.getLogger(__name__)
 @click.command()
 @click.argument("folder", type=str)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
-def main(folder: str, verbose: bool):
+@click.option("--size", default=None,
+              help="Override model dimensions as WxD studs (e.g. --size 4x4). "
+                   "Use this when auto-detection gets the wrong count.")
+def main(folder: str, verbose: bool, size: str | None):
     """
     Generate LEGO building instructions from a folder of images.
 
@@ -86,7 +89,19 @@ def main(folder: str, verbose: bool):
 
         # Phase 2: Analyse images and reconstruct 3D model in one pass
         click.echo("🔍 Phase 2: Analysing model and reconstructing 3D layout...")
-        bricks, width, depth, height = reconstruct(images, client)
+
+        forced_dims = None
+        if size:
+            import re as _re
+            m = _re.match(r"(\d+)[xX×](\d+)", size.strip())
+            if not m:
+                click.echo(f"❌ Error: --size must be WxD (e.g. 4x4), got {size!r}", err=True)
+                sys.exit(1)
+            forced_dims = (int(m.group(1)), int(m.group(2)))
+            click.echo(f"   Using fixed dimensions: {forced_dims[0]}×{forced_dims[1]} studs")
+
+        bricks, width, depth, height = reconstruct(images, client, forced_dims=forced_dims)
+        click.echo(f"   ✓ Detected footprint: {width}×{depth} studs — if wrong, rerun with --size {width}x{depth}")
         click.echo(f"   ✓ Placed {len(bricks)} brick(s) in 3D space ({width}×{depth}×{height} studs)")
 
         # Phase 4: Sequencing

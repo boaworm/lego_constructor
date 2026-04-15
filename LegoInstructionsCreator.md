@@ -1,327 +1,130 @@
 # LEGO Instructions Creator
 
-A tool that generates LEGO building instructions from photos of assembled models.
+> **⚠️ ABANDONED** — See [Why this was abandoned](#why-this-was-abandoned) below.
 
-## Overview
+A tool that attempted to generate LEGO building instructions from photos of assembled models.
 
-**Goal**: Take a folder of images showing an assembled LEGO model from different angles and automatically generate step-by-step building instructions.
+---
 
-**CLI Usage**:
-```bash
-./generate_lego_instructions path/to/folder/with/images
+## Why This Was Abandoned
+
+### The core problem is unsolved
+
+The goal — reconstruct step-by-step building instructions from a photo of a finished LEGO model — turns out to be a genuinely hard, unsolved computer vision problem. No production-ready tool does this reliably.
+
+The approach used here (asking Claude Vision to output ASCII stud-maps of each layer) hits a hard ceiling:
+
+- **Stud counting is unreliable from a perspective photo.** A single-image perspective view creates visual ambiguity. Claude consistently miscounts by 50–100% (e.g. 6×6 instead of 4×4). Prompting improvements (chain-of-thought, arch calibration, multi-run consensus) all plateau at the same error rate. The information simply isn't in a single perspective image.
+- **Layer reconstruction is hallucinated.** With no ground-truth depth information, Claude invents plausible-looking but wrong layer layouts. Duplicate layers, wrong colours, missing layers (e.g. the green base layer was being silently dropped by the deduplication pass).
+- **General vision models aren't trained for this task.** Claude was not trained to count LEGO studs. It reasons about them from general image understanding, which is insufficient for precise grid reconstruction.
+
+### What we investigated
+
+#### Brickognize (brickognize.com)
+
+The most relevant dedicated tool we found. It identifies **individual isolated LEGO parts** from photos:
+
+- **API**: `POST https://api.brickognize.com/predict/parts/` — multipart form with `query_image` field
+- **Free**: Unlimited scans, no auth required
+- **Returns**: Part ID (e.g. `"3001"`), name (`"Brick 2 x 4"`), category, confidence score, BrickLink URL
+- **Not open-source**: The ML model runs remotely only; cannot be run locally
+- **Not useful for assembled models**: Designed for one brick at a time on a clean background, not for analysing a complete assembled model
+
+Example response:
+```json
+{
+  "listing_id": "res-d492bca0",
+  "bounding_box": { "score": 0.95, ... },
+  "items": [
+    {
+      "id": "3001",
+      "name": "Brick 2 x 4",
+      "category": "Brick",
+      "type": "part",
+      "score": 0.91
+    }
+  ]
+}
 ```
 
----
+#### What would actually work
 
-## Tech Stack
+| Approach | Feasibility | Notes |
+|----------|------------|-------|
+| **Multiple images** (top-down + front + side) | Good | Removes depth ambiguity; still requires calibration |
+| **Rebrickable API** (official sets) | Excellent | Pull LDraw file by set number → perfect instructions |
+| **User-guided input** | Good | User describes layers, tool generates instructions |
+| **Multi-camera rig + photogrammetry** | Complex | Research-grade, not off-the-shelf |
 
-### Core Technologies
+For **official LEGO sets**, [Rebrickable](https://rebrickable.com/api/) has LDraw files for most sets. Generating instructions from an LDraw file is a solved problem.
 
-| Component | Technology | Rationale |
-|-----------|-----------|-----------|
-| **Language** | Python 3.13+ | Best ecosystem for CV, image processing, and AI APIs; latest stable with full library support |
-| **Vision API** | Claude Vision API | Strong image understanding, can identify LEGO bricks and spatial relationships |
-| **Image Processing** | OpenCV / Pillow | Local image preprocessing, resizing, format handling |
-| **3D Modeling** | Open3D or Trimesh | Reconstructing 3D structure from detected bricks |
-| **Output Generation** | Jinja2 + HTML/PDF | Templating for instruction generation |
-| **CLI Framework** | Click or argparse | Simple, robust command-line interface |
-
-### Supporting Libraries
-- **numpy/scipy** — Spatial calculations, matrix operations
-- **dataclasses** — Type-safe brick/component definitions
-- **json** — Configuration and data serialization
-- **pytest** — Testing
+For **custom builds**, no practical off-the-shelf solution exists as of 2026.
 
 ---
 
-## Architecture
+## What Was Built
 
-### High-Level Flow
+The pipeline that was implemented before abandonment:
 
 ```
 Input Images
     ↓
-[Image Preprocessing] → Standardize formats, sizes, orientations
+[Image Preprocessing] — resize, base64 encode
     ↓
-[Brick Detection] → Claude Vision API analyzes each image
+[Dimension Analysis] — 2-run consensus call to Claude (often wrong)
     ↓
-[3D Reconstruction] → Merge multi-view detections into 3D model
+[ASCII Map Generation] — Claude outputs per-layer stud grids (hallucinated)
     ↓
-[Assembly Sequencing] → Determine optimal build order
+[Layer Deduplication] — 3-pass dedup (consecutive exact, consecutive pattern, global)
     ↓
-[Instruction Generation] → Create formatted output (HTML/PDF)
+[Brick Tiling] — greedy largest-first algorithm converts grid → Brick objects
     ↓
-Output Instructions
+[Assembly Sequencing] — bottom-up layer order
+    ↓
+[HTML Instruction Generation] — Jinja2 template with embedded images
 ```
 
-### Core Components
+### CLI
 
-#### 1. **Image Processor** (`image_processor.py`)
-- Load images from input folder
-- Validate image quality
-- Normalize sizes/formats
-- Detect image angles/perspectives
+```bash
+python generate_lego_instructions.py <folder> [--size WxD] [--verbose]
 
-#### 2. **Brick Detector** (`brick_detector.py`)
-- Use Claude Vision API to analyze each image
-- Extract: brick type, color, position hints, orientation
-- Return structured brick data per image
-
-#### 3. **3D Reconstructor** (`reconstructor_3d.py`)
-- Merge multi-view brick detections
-- Resolve conflicts/inconsistencies across views
-- Build 3D coordinate system
-- Assign precise (x, y, z) positions to each brick
-
-#### 4. **Assembly Sequencer** (`sequencer.py`)
-- Determine build dependencies (which bricks must come before others)
-- Generate logical assembly order (bottom-up, structural stability)
-- Group bricks into "steps"
-
-#### 5. **Instruction Generator** (`instruction_generator.py`)
-- Create visual instructions for each step
-- Generate HTML or PDF output
-- Include: parts list, step visuals, part counts per step
-
-#### 6. **Data Models** (`models.py`)
-```python
-@dataclass
-class Brick:
-    type: str              # e.g., "2x4 stud brick"
-    color: str             # e.g., "red", "blue"
-    position: tuple(x, y, z)  # 3D coordinates
-    orientation: tuple     # Rotation angles
-    source_image: str      # Which image(s) detected this
-
-@dataclass
-class BuildStep:
-    step_number: int
-    bricks_to_add: List[Brick]
-    instructions_text: str
-    visualization: Image
+# Example with known dimensions:
+python generate_lego_instructions.py nano_castle --size 4x4
 ```
 
----
-
-## Data Flow
-
-1. **Input** → Folder of JPG/PNG images
-2. **Detection Phase** → For each image, Claude Vision extracts brick locations
-3. **Integration Phase** → Correlate bricks across multiple viewpoints
-4. **Validation** → Check for consistency, resolve contradictions
-5. **Assembly Logic** → Determine sequential order
-6. **Output** → Formatted instructions (HTML/PDF with visuals)
-
----
-
-## Key Challenges & Approaches
-
-### Challenge 1: Brick Detection Accuracy
-- **Problem**: Partial visibility, shadows, overlapping bricks
-- **Approach**:
-  - Use multiple angles to improve confidence
-  - Fallback to manual correction UI (future enhancement)
-  - Leverage Claude Vision's spatial reasoning
-
-### Challenge 2: 3D Position Estimation
-- **Problem**: Converting 2D image coordinates to 3D space
-- **Approach**:
-  - Use camera calibration if EXIF data available
-  - Apply perspective geometry assumptions
-  - Cross-validate across multiple viewpoints
-  - Use known LEGO brick dimensions as anchors
-
-### Challenge 3: Assembly Sequencing
-- **Problem**: Determining optimal build order
-- **Approach**:
-  - Bottom-up layer approach (gravity-based)
-  - Structural dependency analysis
-  - Minimize overhang/instability
-  - Heuristic: prioritize supporting structure first
-
-### Challenge 4: Handling Edge Cases
-- **Problem**: Unclear angles, poor lighting, complex overlaps
-- **Approach**:
-  - Image quality validation with user warnings
-  - Confidence scoring on detections
-  - User-guided correction workflow (MVP+ feature)
-
----
-
-## MVP Scope (Phase 1)
-
-### In Scope
-- ✅ CLI interface: `./generate_lego_instructions <folder>`
-- ✅ Multi-image input support (JPG, PNG)
-- ✅ Brick detection via Claude Vision API
-- ✅ Basic 3D reconstruction (assuming orthogonal views)
-- ✅ Simple assembly sequencing (layer-based)
-- ✅ HTML instruction output with parts list
-
-### Out of Scope (for MVP)
-- ❌ PDF generation (use browser print instead)
-- ❌ Interactive 3D viewer
-- ❌ Manual correction UI
-- ❌ Support for non-standard LEGO shapes
-- ❌ Automatic photo angle detection
-
----
-
-## Project Structure
+### Project Structure
 
 ```
 lego_constructor/
-├── generate_lego_instructions       # Main CLI script
+├── generate_lego_instructions.py    # CLI entry point
 ├── lego_creator/
-│   ├── __init__.py
-│   ├── models.py                    # Data models (Brick, BuildStep, etc.)
+│   ├── models.py                    # Brick, BuildStep, LegoModel dataclasses
 │   ├── image_processor.py           # Load & preprocess images
-│   ├── brick_detector.py            # Claude Vision integration
-│   ├── reconstructor_3d.py          # 3D reconstruction logic
-│   ├── sequencer.py                 # Assembly order logic
-│   ├── instruction_generator.py     # Output generation
-│   └── config.py                    # Constants, paths, config
-├── tests/
-│   ├── test_brick_detector.py
-│   ├── test_reconstructor.py
-│   └── test_sequencer.py
-├── mini_castle/                     # Example: multi-image model
-│   ├── *.png                        # Multiple reference images
-│   └── output/                      # Generated instructions
-├── nano_castle/                     # Example: single image model
-│   ├── 1000x800.jpg                 # Input image
-│   └── output/                      # Generated instructions
-├── alamo/                           # Example: building reference
-│   └── images/                      # Reference photos
-├── requirements.txt
-├── README.md
-└── LegoInstructionsCreator.md        # This file
+│   ├── brick_detector.py            # Claude Vision integration (unused in final pipeline)
+│   ├── reconstructor_3d.py          # ASCII map → Brick objects
+│   ├── sequencer.py                 # Layer-based assembly sequencing
+│   ├── instruction_generator.py     # HTML output + step PNG rendering
+│   └── config.py                    # Constants and LEGO colour palette
+├── nano_castle/                     # Test model: single 1000×800px image
+├── mini_castle/                     # Test model: multi-image input
+├── alamo/                           # Test model: complex building
+└── requirements.txt
 ```
 
----
+### Known bugs fixed along the way
 
-## Development Phases
-
-### Phase 1: MVP
-- [ ] Set up CLI & project structure
-- [ ] Image loading & validation
-- [ ] Basic Claude Vision brick detection
-- [ ] Simple 3D reconstruction (layer-based)
-- [ ] Basic instruction generator (HTML)
-- [ ] Test with sample model
-
-### Phase 2: Refinements
-- [ ] Improved 3D reconstruction with perspective
-- [ ] Smarter assembly sequencing
-- [ ] Better instruction formatting & visuals
-- [ ] Error handling & user feedback
-
-### Phase 3: Polish
-- [ ] PDF export
-- [ ] Performance optimization
-- [ ] User documentation
-- [ ] Example models & outputs
+- Green base layer silently removed by the wall-pattern deduplication pass (both solid-colour layers had the same occupied/empty pattern)
+- Duplicate arch layers generated by Claude (fixed with 3-pass deduplication)
+- Red door rendered as yellow (highlight-border rendering was correct; underlying colour is preserved)
+- Stud count off by ~50% (partially mitigated by 2-run consensus, never reliably fixed)
 
 ---
 
-## Dependencies & Setup
-
-**Requirements**: Python 3.13+
+## Dependencies
 
 ```bash
-# Create virtual environment
-python3.13 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install anthropic opencv-python pillow numpy open3d jinja2 click pytest
+pip install anthropic boto3 pillow jinja2 click
 ```
 
----
-
-## Success Criteria
-
-- Tool successfully processes a folder of 3-5 images
-- Generates a readable HTML instruction set
-- Parts list is accurate
-- Assembly order is logical and buildable
-- No manual corrections needed for simple models
-
----
-
-## Examples & Current Status
-
-The project includes several example models that demonstrate the current capabilities:
-
-### Example Models
-
-| Model | Status | Details |
-|-------|--------|---------|
-| **nano_castle/** | ✅ Complete | Single 1000x800px image → 8 step instructions with parts list. |
-| **mini_castle/** | ✅ Complete | Multi-image input (3 PNG reference photos) → 10 step instructions. |
-| **alamo/** | 🔄 In Progress | Building reference images for complex model testing. |
-
-### How to Run
-
-Generate instructions for any example:
-
-```bash
-# Single image example
-./generate_lego_instructions nano_castle
-
-# Multi-image example
-./generate_lego_instructions mini_castle
-
-# View results
-open nano_castle/output/instructions.html
-open mini_castle/output/instructions.html
-```
-
-### Output Features
-
-Each generated instruction set includes:
-
-- **Header with Reference Image** — Shows the expected final result
-- **Parts List** — Complete BOM with color and quantity per brick type
-- **Step-by-Step Visuals** — Top-down grid view for each assembly step
-- **New Brick Highlighting** — Yellow borders highlight newly added pieces in each step
-- **Layer Information** — Shows construction layer/height for each step
-- **Responsive HTML** — Works on desktop and mobile browsers
-
----
-
-## Current Project Status
-
-### ✅ Completed Features
-- [x] CLI interface with Click
-- [x] Multi-format image loading (JPG, PNG)
-- [x] Claude Vision API brick detection
-- [x] 3D reconstruction with position tracking
-- [x] Layer-based assembly sequencing
-- [x] HTML instruction generation with embedded visuals
-- [x] Parts list generation with color coding
-- [x] Reference image in instruction headers
-- [x] Responsive design for instruction display
-
-### 🔄 In Progress / Testing
-- [ ] Multi-image example models
-- [ ] Edge case handling (poor lighting, overlaps)
-- [ ] Confidence scoring for detections
-
-### 📋 Next Steps
-- [ ] PDF export capability
-- [ ] Improved 3D visualization
-- [ ] Performance optimization for large models
-- [ ] Enhanced error messages and user guidance
-
----
-
-## Future Enhancements
-
-1. **Interactive Web UI** — Web interface for upload & viewing
-2. **Real-time Feedback** — Confidence scores for each detection
-3. **Manual Annotation Tool** — Correct detection errors interactively
-4. **Video Input** — Generate instructions from video feeds
-5. **Parts Marketplace** — Link to suppliers for part purchasing
-6. **AR Visualization** — Mobile AR app for instructions
-
+Requires AWS Bedrock credentials with access to `anthropic.claude-opus-4-6-v1`.
